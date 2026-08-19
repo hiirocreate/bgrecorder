@@ -12,6 +12,9 @@ import android.media.MediaRecorder
  * マイクからPCM音声を取り込み、AACにエンコードしてmuxerに書き込むクラス。
  * 独自スレッドでループし、一時停止中はマイクから読んだデータを捨てて
  * エンコーダーには渡さない（＝タイムスタンプは「録画が進んだ分だけ」進む）。
+ *
+ * 注意：このクラスは自前の Thread 上で動く（RecordingServiceのbgHandlerとは別スレッド）。
+ * ここで例外を外に漏らすとアプリごとクラッシュするため、ループ全体をtry/catchで保護する。
  */
 class AudioEncoderCore(private val muxer: MuxerWrapper) {
 
@@ -26,6 +29,9 @@ class AudioEncoderCore(private val muxer: MuxerWrapper) {
     private var thread: Thread? = null
     @Volatile private var running = false
     @Volatile var paused = false
+
+    /** 録音スレッドで想定外のエラーが起きて停止したときに呼ばれる（RecordingService側で録画全体を止めるのに使う） */
+    var onFatalError: (() -> Unit)? = null
 
     // 録音済みサンプル数から算出する再生位置（一時停止中は増えないので、
     // 一時停止しても音声と映像がズレにくい）
@@ -60,32 +66,62 @@ class AudioEncoderCore(private val muxer: MuxerWrapper) {
     }
 
     private fun loop() {
-        val pcmBuf = ByteArray(4096)
-        while (running) {
-            val ar = audioRecord ?: break
-            val read = ar.read(pcmBuf, 0, pcmBuf.size)
-            if (read <= 0) continue
-            if (paused) continue // 一時停止中は読み捨てる（タイムスタンプを進めない）
+        try {
+            val pcmBuf = ByteArray(4096)
+            while (running) {
+                val ar = audioRecord ?: break
+                val read = ar.read(pcmBuf, 0, pcmBuf.size)
+                if (read <= 0) continue
+                if (paused) continue // 一時停止中は読み捨てる（タイムスタンプを進めない）
 
-            feedEncoder(pcmBuf, read)
-            drainEncoder(false)
+                feedEncoder(pcmBuf, read)
+                drainEncoder(false)
+            }
+            // 終了処理：残りをフラッシュしてEOSを送る
+            drainEncoder(true)
+        } catch (e: Exception) {
+            // 想定外の例外（バッファサイズの不一致など）でアプリごと落ちないよう、ここで必ず受け止める
+            running = false
+            onFatalError?.invoke()
         }
-        // 終了処理：残りをフラッシュしてEOSを送る
-        drainEncoder(true)
     }
 
+    /**
+     * PCMデータをエンコーダーへ渡す。
+     *
+     * 重要：MediaCodecが1回に渡す入力バッファのサイズは端末・エンコーダー実装によって異なり、
+     * マイクから読んだ4096バイトより小さいことがある（この不一致が原因でBufferOverflowExceptionが
+     * 発生し、以前はここでアプリごとクラッシュしていた）。そのため、1つの入力バッファに入りきる分だけを
+     * 書き込み、収まらなかった残りは次の入力バッファに回すループにしている。
+     */
     private fun feedEncoder(data: ByteArray, len: Int) {
-        val inIndex = encoder.dequeueInputBuffer(10_000)
-        if (inIndex < 0) return
-        val inBuffer = encoder.getInputBuffer(inIndex) ?: return
-        inBuffer.clear()
-        inBuffer.put(data, 0, len)
+        var offset = 0
+        var attempts = 0
+        while (offset < len && running) {
+            val inIndex = encoder.dequeueInputBuffer(10_000)
+            if (inIndex < 0) {
+                attempts++
+                if (attempts > 50) return // 異常に取得できない場合はこのチャンクを諦める（無限ループ防止）
+                drainEncoder(false)
+                continue
+            }
+            attempts = 0
+            val inBuffer = encoder.getInputBuffer(inIndex)
+            if (inBuffer == null) {
+                encoder.queueInputBuffer(inIndex, 0, 0, 0, 0)
+                continue
+            }
+            inBuffer.clear()
+            val chunk = minOf(len - offset, inBuffer.remaining())
+            inBuffer.put(data, offset, chunk)
 
-        val samples = len / 2 // 16bit mono
-        val ptsUs = totalSamplesWritten * 1_000_000L / SAMPLE_RATE
-        totalSamplesWritten += samples
+            val samples = chunk / 2 // 16bit mono
+            val ptsUs = totalSamplesWritten * 1_000_000L / SAMPLE_RATE
+            totalSamplesWritten += samples
 
-        encoder.queueInputBuffer(inIndex, 0, len, ptsUs, 0)
+            encoder.queueInputBuffer(inIndex, 0, chunk, ptsUs, 0)
+            offset += chunk
+        }
     }
 
     private fun drainEncoder(endOfStream: Boolean) {

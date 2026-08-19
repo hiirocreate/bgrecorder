@@ -166,6 +166,10 @@ class RecordingService : Service() {
 
             val audioEncoderLocal = AudioEncoderCore(muxerLocal)
             audioEncoder = audioEncoderLocal
+            audioEncoderLocal.onFatalError = {
+                notifyError("録音中にエラーが発生したため停止しました")
+                bgHandler.post { stopRecordingInternal() }
+            }
             audioEncoderLocal.start()
 
             openCamera(glPipelineLocal.cameraInputSurface, cameraFacing)
