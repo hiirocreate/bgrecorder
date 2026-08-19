@@ -164,11 +164,10 @@ class RecordingService : Service() {
             // ピクセルを作り直すコストなしに、縦動画は縦動画として正しく再生されるようにする。
             val characteristics = manager.getCameraCharacteristics(cameraId)
             val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-            val rotationHint = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-                (360 - (sensorOrientation % 360)) % 360
-            } else {
-                (sensorOrientation % 360 + 360) % 360
-            }
+            // 撮影画面は縦向き固定（＝端末は常に「自然な向き」で使われる）ため、必要な回転角は
+            // 前面・背面どちらのカメラでもSENSOR_ORIENTATIONそのもの（前面カメラだけ別式にする必要はない。
+            // 鏡写しは録画データではなくプレビュー表示だけに適用しており、この回転角の計算とは無関係）。
+            val rotationHint = ((sensorOrientation % 360) + 360) % 360
 
             tempFile = File(cacheDir, "bgrecorder_temp_${System.currentTimeMillis()}.mp4")
             val muxerLocal = MuxerWrapper(tempFile!!.absolutePath)
