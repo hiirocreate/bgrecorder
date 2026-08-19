@@ -157,8 +157,22 @@ class RecordingService : Service() {
             val videoHeight = resolvedSize.height
             val bitRate = CameraSizeUtil.bitRateFor(videoWidth, videoHeight)
 
+            // カメラセンサーは機種によらずほぼ横向きが基準（SENSOR_ORIENTATION）であり、
+            // 本アプリの撮影画面は縦向き固定のため、そのままでは縦持ちで撮った動画が
+            // 横倒しの映像として保存されてしまう。動画本体は横向きのまま作り、
+            // 「再生時にこの角度だけ回転させる」というメタデータだけをMP4に付与することで、
+            // ピクセルを作り直すコストなしに、縦動画は縦動画として正しく再生されるようにする。
+            val characteristics = manager.getCameraCharacteristics(cameraId)
+            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val rotationHint = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) {
+                (360 - (sensorOrientation % 360)) % 360
+            } else {
+                (sensorOrientation % 360 + 360) % 360
+            }
+
             tempFile = File(cacheDir, "bgrecorder_temp_${System.currentTimeMillis()}.mp4")
             val muxerLocal = MuxerWrapper(tempFile!!.absolutePath)
+            muxerLocal.setOrientationHint(rotationHint)
             muxer = muxerLocal
 
             val videoEncoderLocal = VideoEncoderCore(videoWidth, videoHeight, bitRate, muxerLocal)
@@ -181,17 +195,25 @@ class RecordingService : Service() {
                         glPipelineLocal.surfaceTexture.updateTexImage()
                     }
                 } catch (e: Exception) {
-                    // 描画・エンコード中の例外はここで必ず食い止める（漏らすとアプリごと落ちる）
-                    notifyError("録画中にエラーが発生したため停止しました")
-                    stopRecordingInternal()
+                    // 描画・エンコード中の例外はここで必ず食い止める（漏らすとアプリごと落ちる）。
+                    // ただし、すでに停止操作によってIDLEへ戻っている場合は、解放済みのリソースに
+                    // 触れたことによる後始末上の例外にすぎないので、ユーザーへエラー表示はしない
+                    // （停止操作のたびに「エラーが発生しました」と出てしまっていた問題の修正）。
+                    if (state != State.IDLE) {
+                        notifyError("録画中にエラーが発生したため停止しました")
+                        stopRecordingInternal()
+                    }
                 }
             }, bgHandler)
 
             val audioEncoderLocal = AudioEncoderCore(muxerLocal)
             audioEncoder = audioEncoderLocal
             audioEncoderLocal.onFatalError = {
-                notifyError("録音中にエラーが発生したため停止しました")
-                bgHandler.post { stopRecordingInternal() }
+                // 同様に、すでに停止済み/停止中であれば通知しない（エラー時のみ通知する）
+                if (state != State.IDLE) {
+                    notifyError("録音中にエラーが発生したため停止しました")
+                    bgHandler.post { stopRecordingInternal() }
+                }
             }
             audioEncoderLocal.start()
 

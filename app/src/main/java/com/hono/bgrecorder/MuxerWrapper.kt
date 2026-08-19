@@ -22,6 +22,20 @@ class MuxerWrapper(outputPath: String) {
 
     var expectAudio = true
 
+    /**
+     * 動画に「表示時にこの角度だけ回転させる」というメタデータ（回転ヒント）を付与する。
+     * ピクセルデータ自体は回転させず、再生側（ビューア等）がこの情報を見て回転して表示する。
+     * MediaMuxerの仕様上、start()より前に呼ぶ必要がある（start()後は無視される）ため、
+     * MuxerWrapperの生成直後、まだトラックが追加される前に呼ぶこと。
+     */
+    fun setOrientationHint(degrees: Int) {
+        try {
+            muxer.setOrientationHint(((degrees % 360) + 360) % 360)
+        } catch (e: Exception) {
+            // 無視（回転メタデータが付かないだけで、録画自体は継続できる）
+        }
+    }
+
     fun setVideoFormat(format: MediaFormat) {
         synchronized(lock) {
             videoFormat = format

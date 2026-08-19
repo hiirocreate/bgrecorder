@@ -43,12 +43,20 @@ object CameraSizeUtil {
         }
     }
 
-    /** 解像度に応じたビットレート（1080p=8Mbpsを基準に画素数で比例させ、極端な値にならないようクランプ） */
+    /**
+     * 解像度に応じたビットレート（1080p=6Mbpsを基準に画素数で比例させ、極端な値にならないようクランプ）。
+     *
+     * 以前は1080p=8Mbpsを基準にしていたが、動画の容量が大きすぎるとの要望を受けて引き下げた。
+     * 画質そのものはビットレートの絶対値だけで決まるわけではなく、可変ビットレート（VBR、
+     * VideoEncoderCore側で設定）と組み合わせることで、静止シーンでは自動的にビットレートを
+     * 下げつつ動きの多いシーンではしっかり使う、という配分により、体感画質を保ちながら
+     * 平均容量を抑えられる。
+     */
     fun bitRateFor(width: Int, height: Int): Int {
         val pixels = width.toLong() * height.toLong()
         val basePixels = 1920L * 1080L
-        val base = 8_000_000.0
+        val base = 6_000_000.0
         val scaled = base * (pixels.toDouble() / basePixels.toDouble())
-        return scaled.toInt().coerceIn(3_000_000, 24_000_000)
+        return scaled.toInt().coerceIn(2_000_000, 20_000_000)
     }
 }

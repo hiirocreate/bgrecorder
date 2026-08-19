@@ -28,14 +28,22 @@ class VideoEncoderCore(
     val usingHevc: Boolean
 
     companion object {
-        private const val HEVC_BITRATE_SCALE = 0.6
+        // HEVCはH.264より同じ画質をより低いビットレートで出せるため、H.264換算のビットレートに
+        // この係数をかけて使う。容量をもう少し抑えたいという要望を受けて0.6→0.55に引き下げた。
+        private const val HEVC_BITRATE_SCALE = 0.55
     }
 
     private class Built(val codec: MediaCodec, val surface: Surface, val hevc: Boolean)
 
     init {
-        val built = tryBuild(width, height, requestedBitRate, preferHevc = true)
-            ?: tryBuild(width, height, requestedBitRate, preferHevc = false)
+        // HEVC→AVCの順で試し、それぞれ「可変ビットレート(VBR)あり」→「なし」の順で試す。
+        // VBRは静止シーンでビットレートを自動的に下げてくれるため、体感画質を保ったまま
+        // 平均ファイルサイズを抑えられる（ほとんどの機種で対応しているが、稀に非対応の
+        // 端末・エンコーダーがあるため、その場合は自動的にVBR無しにフォールバックする）。
+        val built = tryBuild(width, height, requestedBitRate, preferHevc = true, useVbr = true)
+            ?: tryBuild(width, height, requestedBitRate, preferHevc = true, useVbr = false)
+            ?: tryBuild(width, height, requestedBitRate, preferHevc = false, useVbr = true)
+            ?: tryBuild(width, height, requestedBitRate, preferHevc = false, useVbr = false)
             ?: throw RuntimeException("H.264エンコーダーの初期化にも失敗しました")
         encoder = built.codec
         inputSurface = built.surface
@@ -43,7 +51,7 @@ class VideoEncoderCore(
         encoder.start()
     }
 
-    private fun tryBuild(width: Int, height: Int, requestedBitRate: Int, preferHevc: Boolean): Built? {
+    private fun tryBuild(width: Int, height: Int, requestedBitRate: Int, preferHevc: Boolean, useVbr: Boolean): Built? {
         val mimeType = if (preferHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
         val effectiveBitRate = if (preferHevc) (requestedBitRate * HEVC_BITRATE_SCALE).toInt() else requestedBitRate
 
@@ -54,6 +62,9 @@ class VideoEncoderCore(
                 setInteger(MediaFormat.KEY_BIT_RATE, effectiveBitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                if (useVbr) {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                }
             }
             val c = MediaCodec.createEncoderByType(mimeType)
             codec = c
