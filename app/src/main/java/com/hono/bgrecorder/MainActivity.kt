@@ -41,9 +41,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pauseResumeBtn: Button
     private lateinit var filterButtons: List<Button>
     private lateinit var facingButtons: List<Button>
+    private lateinit var resolutionButtons: List<Button>
 
     private var selectedFilter = FilterMode.NORMAL
     private var selectedFacing = CameraCharacteristics.LENS_FACING_BACK
+    private var selectedWidth = 1920
+    private var selectedHeight = 1080
 
     private var recordingService: RecordingService? = null
     private var bound = false
@@ -191,6 +194,32 @@ class MainActivity : AppCompatActivity() {
         idlePanel.addView(filterRow)
         updateFilterButtonStyles()
 
+        val resolutionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        val resolutionLabels = listOf(
+            "720p" to (1280 to 720),
+            "1080p" to (1920 to 1080),
+            "4K" to (3840 to 2160),
+        )
+        resolutionButtons = resolutionLabels.map { (label, size) ->
+            Button(this).apply {
+                text = label
+                setOnClickListener {
+                    if (selectedWidth != size.first || selectedHeight != size.second) {
+                        selectedWidth = size.first
+                        selectedHeight = size.second
+                        updateResolutionButtonStyles()
+                        closePreviewCamera()
+                        openCameraPreviewIfReady()
+                    }
+                }
+                val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                lp.setMargins(8, 8, 8, 8)
+                resolutionRow.addView(this, lp)
+            }
+        }
+        idlePanel.addView(resolutionRow)
+        updateResolutionButtonStyles()
+
         val startBtn = Button(this).apply {
             text = "● 録画開始"
             setOnClickListener { startRecording() }
@@ -256,6 +285,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateResolutionButtonStyles() {
+        val sizes = listOf(1280 to 720, 1920 to 1080, 3840 to 2160)
+        resolutionButtons.forEachIndexed { i, btn ->
+            val isSelected = sizes[i].first == selectedWidth && sizes[i].second == selectedHeight
+            btn.alpha = if (isSelected) 1.0f else 0.5f
+        }
+    }
+
     private fun updateFacingButtonStyles() {
         val facings = listOf(CameraCharacteristics.LENS_FACING_BACK, CameraCharacteristics.LENS_FACING_FRONT)
         facingButtons.forEachIndexed { i, btn ->
@@ -300,7 +337,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPreviewSession(device: CameraDevice) {
         val texture = textureView.surfaceTexture ?: return
-        texture.setDefaultBufferSize(1920, 1080)
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val previewSize = CameraSizeUtil.chooseSupportedSize(manager, device.id, selectedWidth, selectedHeight)
+        texture.setDefaultBufferSize(previewSize.width, previewSize.height)
         val surface = android.view.Surface(texture)
         val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         requestBuilder.addTarget(surface)
@@ -334,6 +373,8 @@ class MainActivity : AppCompatActivity() {
             action = RecordingService.ACTION_START
             putExtra(RecordingService.EXTRA_FILTER_MODE, selectedFilter)
             putExtra(RecordingService.EXTRA_CAMERA_FACING, selectedFacing)
+            putExtra(RecordingService.EXTRA_VIDEO_WIDTH, selectedWidth)
+            putExtra(RecordingService.EXTRA_VIDEO_HEIGHT, selectedHeight)
         }
         ContextCompat.startForegroundService(this, intent)
     }

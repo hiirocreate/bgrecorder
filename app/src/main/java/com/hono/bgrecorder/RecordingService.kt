@@ -37,12 +37,13 @@ class RecordingService : Service() {
         const val ACTION_STOP = "com.hono.bgrecorder.action.STOP"
         const val EXTRA_FILTER_MODE = "filter_mode"
         const val EXTRA_CAMERA_FACING = "camera_facing"
+        const val EXTRA_VIDEO_WIDTH = "video_width"
+        const val EXTRA_VIDEO_HEIGHT = "video_height"
 
         private const val CHANNEL_ID = "recording_channel"
         private const val NOTIF_ID = 1001
-        private const val VIDEO_WIDTH = 1920
-        private const val VIDEO_HEIGHT = 1080
-        private const val BIT_RATE = 8_000_000
+        private const val DEFAULT_WIDTH = 1920
+        private const val DEFAULT_HEIGHT = 1080
         private const val PREF_MIGRATED = "migrated_to_private_storage_v1"
     }
 
@@ -62,6 +63,8 @@ class RecordingService : Service() {
 
     private var filterMode = FilterMode.NORMAL
     private var cameraFacing = CameraCharacteristics.LENS_FACING_BACK
+    private var requestedWidth = DEFAULT_WIDTH
+    private var requestedHeight = DEFAULT_HEIGHT
 
     private lateinit var bgThread: HandlerThread
     private lateinit var bgHandler: Handler
@@ -94,6 +97,8 @@ class RecordingService : Service() {
             ACTION_START -> {
                 filterMode = intent.getIntExtra(EXTRA_FILTER_MODE, FilterMode.NORMAL)
                 cameraFacing = intent.getIntExtra(EXTRA_CAMERA_FACING, CameraCharacteristics.LENS_FACING_BACK)
+                requestedWidth = intent.getIntExtra(EXTRA_VIDEO_WIDTH, DEFAULT_WIDTH)
+                requestedHeight = intent.getIntExtra(EXTRA_VIDEO_HEIGHT, DEFAULT_HEIGHT)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         NOTIF_ID,
@@ -134,14 +139,32 @@ class RecordingService : Service() {
         }
 
         try {
+            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = manager.cameraIdList.firstOrNull { id ->
+                manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == cameraFacing
+            } ?: manager.cameraIdList.firstOrNull()
+
+            if (cameraId == null) {
+                handleStartFailure("使用できるカメラが見つかりませんでした")
+                return
+            }
+
+            // 「希望の解像度」ではなく「カメラが実際にサポートしている解像度」を使う。
+            // これをしないと、カメラの実出力とエンコード先のサイズが食い違い、映像が
+            // 引き伸ばされる（横長になる等）ことがある。
+            val resolvedSize = CameraSizeUtil.chooseSupportedSize(manager, cameraId, requestedWidth, requestedHeight)
+            val videoWidth = resolvedSize.width
+            val videoHeight = resolvedSize.height
+            val bitRate = CameraSizeUtil.bitRateFor(videoWidth, videoHeight)
+
             tempFile = File(cacheDir, "bgrecorder_temp_${System.currentTimeMillis()}.mp4")
             val muxerLocal = MuxerWrapper(tempFile!!.absolutePath)
             muxer = muxerLocal
 
-            val videoEncoderLocal = VideoEncoderCore(VIDEO_WIDTH, VIDEO_HEIGHT, BIT_RATE, muxerLocal)
+            val videoEncoderLocal = VideoEncoderCore(videoWidth, videoHeight, bitRate, muxerLocal)
             videoEncoder = videoEncoderLocal
 
-            val glPipelineLocal = GLFilterPipeline(videoEncoderLocal.inputSurface, VIDEO_WIDTH, VIDEO_HEIGHT)
+            val glPipelineLocal = GLFilterPipeline(videoEncoderLocal.inputSurface, videoWidth, videoHeight)
             glPipeline = glPipelineLocal
 
             recordingStartNanos = SystemClock.elapsedRealtimeNanos()
@@ -172,7 +195,7 @@ class RecordingService : Service() {
             }
             audioEncoderLocal.start()
 
-            openCamera(glPipelineLocal.cameraInputSurface, cameraFacing)
+            openCamera(glPipelineLocal.cameraInputSurface, cameraId)
 
             state = State.RECORDING
             postStateChanged()
@@ -182,16 +205,8 @@ class RecordingService : Service() {
         }
     }
 
-    private fun openCamera(targetSurface: android.view.Surface, facing: Int) {
+    private fun openCamera(targetSurface: android.view.Surface, cameraId: String) {
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val cameraId = manager.cameraIdList.firstOrNull { id ->
-            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == facing
-        } ?: manager.cameraIdList.firstOrNull()
-
-        if (cameraId == null) {
-            handleStartFailure("使用できるカメラが見つかりませんでした")
-            return
-        }
 
         try {
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
