@@ -24,9 +24,11 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
@@ -81,6 +83,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLogger.install(this)
+
+        val lastCrash = CrashLogger.readAndClear(this)
+        if (lastCrash != null) {
+            showCrashDialog(lastCrash)
+            return
+        }
+
         bgThread = HandlerThread("MainActivityCamera").apply { start() }
         bgHandler = Handler(bgThread.looper)
 
@@ -100,6 +110,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         bound = bindService(Intent(this, RecordingService::class.java), connection, Context.BIND_AUTO_CREATE)
+    }
+
+    /** 前回クラッシュしていた場合、その内容をコピー可能なダイアログで表示する（ログを見る手段が無くても送れるように） */
+    private fun showCrashDialog(text: String) {
+        val textView = TextView(this).apply {
+            setText(text)
+            setTextIsSelectable(true)
+            setPadding(32, 32, 32, 32)
+            textSize = 12f
+        }
+        val scrollView = ScrollView(this).apply { addView(textView) }
+        AlertDialog.Builder(this)
+            .setTitle("前回のクラッシュ内容（長押しでコピーできます）")
+            .setView(scrollView)
+            .setCancelable(false)
+            .setPositiveButton("閉じる") { _, _ -> recreate() }
+            .show()
     }
 
     // ---- 画面構築（レイアウトXMLは使わずコードだけで組み立てる） ----
