@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">BGRecorder</string>
+    <string name="app_name">Y</string>
     <string name="notif_channel_name">録画中</string>
     <string name="notif_recording">録画中</string>
     <string name="notif_paused">一時停止中</string>
