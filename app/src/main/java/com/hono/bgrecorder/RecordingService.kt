@@ -9,7 +9,6 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -37,6 +36,7 @@ class RecordingService : Service() {
         const val ACTION_RESUME = "com.hono.bgrecorder.action.RESUME"
         const val ACTION_STOP = "com.hono.bgrecorder.action.STOP"
         const val EXTRA_FILTER_MODE = "filter_mode"
+        const val EXTRA_CAMERA_FACING = "camera_facing"
 
         private const val CHANNEL_ID = "recording_channel"
         private const val NOTIF_ID = 1001
@@ -57,7 +57,11 @@ class RecordingService : Service() {
         private set
     var stateListener: ((State) -> Unit)? = null
 
+    /** 録画開始に失敗したり、録画中に致命的なエラーが起きたときにUI側へ知らせるためのコールバック */
+    var errorListener: ((String) -> Unit)? = null
+
     private var filterMode = FilterMode.NORMAL
+    private var cameraFacing = CameraCharacteristics.LENS_FACING_BACK
 
     private lateinit var bgThread: HandlerThread
     private lateinit var bgHandler: Handler
@@ -89,6 +93,7 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 filterMode = intent.getIntExtra(EXTRA_FILTER_MODE, FilterMode.NORMAL)
+                cameraFacing = intent.getIntExtra(EXTRA_CAMERA_FACING, CameraCharacteristics.LENS_FACING_BACK)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         NOTIF_ID,
@@ -112,6 +117,9 @@ class RecordingService : Service() {
     }
 
     // ---- カメラ・エンコーダーのセットアップ（バックグラウンドスレッドで実行） ----
+    // このメソッド以下は全て bgHandler（専用スレッド）上で動く。想定外の例外が
+    // 1つでも外に漏れるとアプリ全体がクラッシュするため、必ずtry/catchで受け止め、
+    // 失敗時は確実にリソース解放してIDLEへ戻す。
 
     private fun startRecordingInternal() {
         if (state != State.IDLE) return
@@ -121,51 +129,65 @@ class RecordingService : Service() {
         val hasMic = ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasCamera || !hasMic) {
-            stopSelf()
+            handleStartFailure("カメラ・マイクの権限がありません")
             return
         }
 
-        tempFile = File(cacheDir, "bgrecorder_temp_${System.currentTimeMillis()}.mp4")
-        val muxerLocal = MuxerWrapper(tempFile!!.absolutePath)
-        muxer = muxerLocal
+        try {
+            tempFile = File(cacheDir, "bgrecorder_temp_${System.currentTimeMillis()}.mp4")
+            val muxerLocal = MuxerWrapper(tempFile!!.absolutePath)
+            muxer = muxerLocal
 
-        val videoEncoderLocal = VideoEncoderCore(VIDEO_WIDTH, VIDEO_HEIGHT, BIT_RATE, muxerLocal)
-        videoEncoder = videoEncoderLocal
+            val videoEncoderLocal = VideoEncoderCore(VIDEO_WIDTH, VIDEO_HEIGHT, BIT_RATE, muxerLocal)
+            videoEncoder = videoEncoderLocal
 
-        val glPipelineLocal = GLFilterPipeline(videoEncoderLocal.inputSurface, VIDEO_WIDTH, VIDEO_HEIGHT)
-        glPipeline = glPipelineLocal
+            val glPipelineLocal = GLFilterPipeline(videoEncoderLocal.inputSurface, VIDEO_WIDTH, VIDEO_HEIGHT)
+            glPipeline = glPipelineLocal
 
-        recordingStartNanos = SystemClock.elapsedRealtimeNanos()
-        pausedAccumNanos = 0L
+            recordingStartNanos = SystemClock.elapsedRealtimeNanos()
+            pausedAccumNanos = 0L
 
-        glPipelineLocal.surfaceTexture.setOnFrameAvailableListener({
-            if (state == State.RECORDING) {
-                val pts = SystemClock.elapsedRealtimeNanos() - recordingStartNanos - pausedAccumNanos
-                glPipelineLocal.drawFrame(filterMode, pts)
-                videoEncoderLocal.drain(false)
-            } else {
-                // 一時停止中でもバッファは消費しておく（詰まり防止）
-                glPipelineLocal.surfaceTexture.updateTexImage()
-            }
-        }, bgHandler)
+            glPipelineLocal.surfaceTexture.setOnFrameAvailableListener({
+                try {
+                    if (state == State.RECORDING) {
+                        val pts = SystemClock.elapsedRealtimeNanos() - recordingStartNanos - pausedAccumNanos
+                        glPipelineLocal.drawFrame(filterMode, pts)
+                        videoEncoderLocal.drain(false)
+                    } else {
+                        // 一時停止中でもバッファは消費しておく（詰まり防止）
+                        glPipelineLocal.surfaceTexture.updateTexImage()
+                    }
+                } catch (e: Exception) {
+                    // 描画・エンコード中の例外はここで必ず食い止める（漏らすとアプリごと落ちる）
+                    notifyError("録画中にエラーが発生したため停止しました")
+                    stopRecordingInternal()
+                }
+            }, bgHandler)
 
-        val audioEncoderLocal = AudioEncoderCore(muxerLocal)
-        audioEncoder = audioEncoderLocal
-        audioEncoderLocal.start()
+            val audioEncoderLocal = AudioEncoderCore(muxerLocal)
+            audioEncoder = audioEncoderLocal
+            audioEncoderLocal.start()
 
-        openCamera(glPipelineLocal.cameraInputSurface)
+            openCamera(glPipelineLocal.cameraInputSurface, cameraFacing)
 
-        state = State.RECORDING
-        postStateChanged()
-        updateNotification()
+            state = State.RECORDING
+            postStateChanged()
+            updateNotification()
+        } catch (e: Exception) {
+            handleStartFailure("録画を開始できませんでした")
+        }
     }
 
-    private fun openCamera(targetSurface: android.view.Surface) {
+    private fun openCamera(targetSurface: android.view.Surface, facing: Int) {
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = manager.cameraIdList.firstOrNull { id ->
-            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
-                CameraCharacteristics.LENS_FACING_BACK
-        } ?: manager.cameraIdList.firstOrNull() ?: return
+            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == facing
+        } ?: manager.cameraIdList.firstOrNull()
+
+        if (cameraId == null) {
+            handleStartFailure("使用できるカメラが見つかりませんでした")
+            return
+        }
 
         try {
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -182,86 +204,125 @@ class RecordingService : Service() {
                 override fun onError(device: CameraDevice, error: Int) {
                     device.close()
                     cameraDevice = null
+                    if (state != State.IDLE) {
+                        handleStartFailure("カメラの起動に失敗しました")
+                    }
                 }
             }, bgHandler)
-        } catch (e: SecurityException) {
-            stopSelf()
+        } catch (e: Exception) {
+            handleStartFailure("カメラを開けませんでした")
         }
     }
 
     private fun createCaptureSession(device: CameraDevice, targetSurface: android.view.Surface) {
-        val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-        requestBuilder.addTarget(targetSurface)
-        requestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+        try {
+            val requestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            requestBuilder.addTarget(targetSurface)
+            requestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
-        device.createCaptureSession(
-            listOf(targetSurface),
-            object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(session: CameraCaptureSession) {
-                    captureSession = session
-                    try {
-                        session.setRepeatingRequest(requestBuilder.build(), null, bgHandler)
-                    } catch (e: Exception) {
-                        // 無視（クローズされた後などに呼ばれる場合がある）
+            device.createCaptureSession(
+                listOf(targetSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        captureSession = session
+                        try {
+                            session.setRepeatingRequest(requestBuilder.build(), null, bgHandler)
+                        } catch (e: Exception) {
+                            // 無視（クローズされた後などに呼ばれる場合がある）
+                        }
                     }
-                }
 
-                override fun onConfigureFailed(session: CameraCaptureSession) {
-                    stopSelf()
-                }
-            },
-            bgHandler
-        )
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        if (state != State.IDLE) {
+                            handleStartFailure("カメラの設定に失敗しました")
+                        }
+                    }
+                },
+                bgHandler
+            )
+        } catch (e: Exception) {
+            handleStartFailure("カメラの設定に失敗しました")
+        }
     }
 
     private fun pauseRecordingInternal() {
         if (state != State.RECORDING) return
-        pauseStartNanos = SystemClock.elapsedRealtimeNanos()
-        state = State.PAUSED
-        audioEncoder?.paused = true
-        postStateChanged()
-        updateNotification()
+        try {
+            pauseStartNanos = SystemClock.elapsedRealtimeNanos()
+            state = State.PAUSED
+            audioEncoder?.paused = true
+            postStateChanged()
+            updateNotification()
+        } catch (e: Exception) {
+            notifyError("一時停止に失敗しました")
+        }
     }
 
     private fun resumeRecordingInternal() {
         if (state != State.PAUSED) return
-        pausedAccumNanos += SystemClock.elapsedRealtimeNanos() - pauseStartNanos
-        state = State.RECORDING
-        audioEncoder?.paused = false
-        postStateChanged()
-        updateNotification()
+        try {
+            pausedAccumNanos += SystemClock.elapsedRealtimeNanos() - pauseStartNanos
+            state = State.RECORDING
+            audioEncoder?.paused = false
+            postStateChanged()
+            updateNotification()
+        } catch (e: Exception) {
+            notifyError("再開に失敗しました")
+        }
     }
 
-    private fun stopRecordingInternal() {
-        if (state == State.IDLE) return
+    /** 録画開始～セットアップ中に失敗した場合の後始末。必ずIDLEへ戻し、確保しかけたリソースを解放する。 */
+    private fun handleStartFailure(message: String) {
+        if (state == State.IDLE && videoEncoder == null && glPipeline == null && audioEncoder == null && muxer == null) {
+            // まだ何も確保していない場合はシンプルに終了するだけでよい
+            notifyError(message)
+            stopForeground(true)
+            stopSelf()
+            return
+        }
+        notifyError(message)
+        stopRecordingInternal(discardOutput = true)
+    }
+
+    private fun stopRecordingInternal(discardOutput: Boolean = false) {
+        if (state == State.IDLE && videoEncoder == null && glPipeline == null && audioEncoder == null && muxer == null) return
         state = State.IDLE
 
         try {
-            captureSession?.stopRepeating()
-            captureSession?.close()
-        } catch (e: Exception) { /* 無視 */ }
-        try {
-            cameraDevice?.close()
-        } catch (e: Exception) { /* 無視 */ }
-        captureSession = null
-        cameraDevice = null
+            try {
+                captureSession?.stopRepeating()
+                captureSession?.close()
+            } catch (e: Exception) { /* 無視 */ }
+            try {
+                cameraDevice?.close()
+            } catch (e: Exception) { /* 無視 */ }
+            captureSession = null
+            cameraDevice = null
 
-        videoEncoder?.drain(true)
-        audioEncoder?.stop()
-        videoEncoder?.release()
-        glPipeline?.release()
-        muxer?.release()
+            try { videoEncoder?.drain(true) } catch (e: Exception) { /* 無視 */ }
+            try { audioEncoder?.stop() } catch (e: Exception) { /* 無視 */ }
+            try { videoEncoder?.release() } catch (e: Exception) { /* 無視 */ }
+            try { glPipeline?.release() } catch (e: Exception) { /* 無視 */ }
+            try { muxer?.release() } catch (e: Exception) { /* 無視 */ }
+        } catch (e: Exception) {
+            // 想定外の例外があっても、下のfinallyで後始末は必ず行う
+        } finally {
+            videoEncoder = null
+            glPipeline = null
+            audioEncoder = null
+            muxer = null
 
-        videoEncoder = null
-        glPipeline = null
-        audioEncoder = null
-        muxer = null
+            if (discardOutput) {
+                try { tempFile?.delete() } catch (e: Exception) { /* 無視 */ }
+                tempFile = null
+            } else {
+                saveToPrivateStorage()
+            }
 
-        saveToPrivateStorage()
-
-        postStateChanged()
-        stopForeground(true)
-        stopSelf()
+            postStateChanged()
+            stopForeground(true)
+            stopSelf()
+        }
     }
 
     /**
@@ -332,6 +393,11 @@ class RecordingService : Service() {
     private fun postStateChanged() {
         val s = state
         Handler(mainLooper).post { stateListener?.invoke(s) }
+    }
+
+    private fun notifyError(message: String) {
+        val listener = errorListener
+        Handler(mainLooper).post { listener?.invoke(message) }
     }
 
     // ---- 通知 ----

@@ -12,7 +12,6 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -39,8 +38,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var pauseResumeBtn: Button
     private lateinit var filterButtons: List<Button>
+    private lateinit var facingButtons: List<Button>
 
     private var selectedFilter = FilterMode.NORMAL
+    private var selectedFacing = CameraCharacteristics.LENS_FACING_BACK
 
     private var recordingService: RecordingService? = null
     private var bound = false
@@ -55,6 +56,11 @@ class MainActivity : AppCompatActivity() {
             val binder = service as RecordingService.LocalBinder
             recordingService = binder.getService()
             recordingService?.stateListener = { state -> runOnUiThread { onServiceStateChanged(state) } }
+            recordingService?.errorListener = { message ->
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                }
+            }
             onServiceStateChanged(recordingService!!.state)
         }
 
@@ -111,11 +117,36 @@ class MainActivity : AppCompatActivity() {
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
         }
 
-        // ---- 撮影前パネル：フィルター選択 + 録画開始ボタン ----
+        // ---- 撮影前パネル：カメラ切替 + フィルター選択 + 録画開始ボタン ----
         idlePanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 48)
         }
+
+        val facingRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        val facingLabels = listOf(
+            "背面" to CameraCharacteristics.LENS_FACING_BACK,
+            "前面" to CameraCharacteristics.LENS_FACING_FRONT,
+        )
+        facingButtons = facingLabels.map { (label, facing) ->
+            Button(this).apply {
+                text = label
+                setOnClickListener {
+                    if (selectedFacing != facing) {
+                        selectedFacing = facing
+                        updateFacingButtonStyles()
+                        closePreviewCamera()
+                        openCameraPreviewIfReady()
+                    }
+                }
+                val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                lp.setMargins(8, 8, 8, 8)
+                facingRow.addView(this, lp)
+            }
+        }
+        idlePanel.addView(facingRow)
+        updateFacingButtonStyles()
+
         val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         val labels = listOf("通常" to FilterMode.NORMAL, "暗所" to FilterMode.NIGHT, "風景" to FilterMode.LANDSCAPE)
         filterButtons = labels.map { (label, mode) ->
@@ -198,6 +229,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateFacingButtonStyles() {
+        val facings = listOf(CameraCharacteristics.LENS_FACING_BACK, CameraCharacteristics.LENS_FACING_FRONT)
+        facingButtons.forEachIndexed { i, btn ->
+            val isSelected = facings[i] == selectedFacing
+            btn.alpha = if (isSelected) 1.0f else 0.5f
+        }
+        // 前面カメラのプレビューは鏡写しにして、自然な「セルフィー」表示にする
+        // （録画データ自体は反転しない。プレビュー表示だけの見た目の調整）
+        if (::textureView.isInitialized) {
+            textureView.scaleX = if (selectedFacing == CameraCharacteristics.LENS_FACING_FRONT) -1f else 1f
+        }
+    }
+
     // ---- 撮影前プレビュー（フィルターなしの単純なCamera2プレビュー） ----
     private fun openCameraPreviewIfReady() {
         if (!textureView.isAvailable) return
@@ -206,8 +250,7 @@ class MainActivity : AppCompatActivity() {
 
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = manager.cameraIdList.firstOrNull { id ->
-            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
-                CameraCharacteristics.LENS_FACING_BACK
+            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == selectedFacing
         } ?: manager.cameraIdList.firstOrNull() ?: return
 
         try {
@@ -263,6 +306,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, RecordingService::class.java).apply {
             action = RecordingService.ACTION_START
             putExtra(RecordingService.EXTRA_FILTER_MODE, selectedFilter)
+            putExtra(RecordingService.EXTRA_CAMERA_FACING, selectedFacing)
         }
         ContextCompat.startForegroundService(this, intent)
     }

@@ -10,9 +10,10 @@ import android.view.Surface
  * GLの描画先として `inputSurface` を使う（MediaCodecの「Surface入力」モード）。
  *
  * 画質を保ったままファイルサイズを抑えるため、端末が対応していればH.265(HEVC)を使う。
- * 対応していない端末では自動的にH.264(AVC)にフォールバックする。
- * H.265は同じビットレートでもH.264より高効率なので、H.265使用時はビットレートを
- * 下げてファイルサイズを縮小しつつ、体感画質はH.264のフルビットレートと同等になるようにしている。
+ * ただし「HEVCのエンコーダーが存在する」ことと「今回の解像度・ビットレートで実際に
+ * configureが通る」ことは別なので、実際にconfigureまで試してみて、失敗したら
+ * その場でH.264(AVC)に切り替える（＝ここで例外を外に漏らさないことが重要。
+ * 漏らすとバックグラウンドスレッドで拾われずアプリごと落ちる）。
  */
 class VideoEncoderCore(
     width: Int,
@@ -28,34 +29,45 @@ class VideoEncoderCore(
 
     companion object {
         private const val HEVC_BITRATE_SCALE = 0.6
-
-        private fun hevcSupported(): Boolean {
-            return try {
-                val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-                codec.release()
-                true
-            } catch (e: Exception) {
-                false
-            }
-        }
     }
 
-    init {
-        val hevcOk = hevcSupported()
-        usingHevc = hevcOk
-        val mimeType = if (hevcOk) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-        val effectiveBitRate = if (hevcOk) (requestedBitRate * HEVC_BITRATE_SCALE).toInt() else requestedBitRate
+    private class Built(val codec: MediaCodec, val surface: Surface, val hevc: Boolean)
 
-        val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, effectiveBitRate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-        }
-        encoder = MediaCodec.createEncoderByType(mimeType)
-        encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = encoder.createInputSurface()
+    init {
+        val built = tryBuild(width, height, requestedBitRate, preferHevc = true)
+            ?: tryBuild(width, height, requestedBitRate, preferHevc = false)
+            ?: throw RuntimeException("H.264エンコーダーの初期化にも失敗しました")
+        encoder = built.codec
+        inputSurface = built.surface
+        usingHevc = built.hevc
         encoder.start()
+    }
+
+    private fun tryBuild(width: Int, height: Int, requestedBitRate: Int, preferHevc: Boolean): Built? {
+        val mimeType = if (preferHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        val effectiveBitRate = if (preferHevc) (requestedBitRate * HEVC_BITRATE_SCALE).toInt() else requestedBitRate
+
+        var codec: MediaCodec? = null
+        return try {
+            val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, effectiveBitRate)
+                setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+            }
+            val c = MediaCodec.createEncoderByType(mimeType)
+            codec = c
+            c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val surface = c.createInputSurface()
+            Built(c, surface, preferHevc)
+        } catch (e: Exception) {
+            try {
+                codec?.release()
+            } catch (e2: Exception) {
+                // 無視
+            }
+            null
+        }
     }
 
     /** エンコーダーの出力キューにたまったデータをmuxerに書き込む。定期的に呼ぶ。 */
