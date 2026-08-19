@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">BGRecorder</string>
+    <string name="notif_channel_name">録画中</string>
+    <string name="notif_recording">録画中</string>
+    <string name="notif_paused">一時停止中</string>
+    <string name="action_pause">一時停止</string>
+    <string name="action_resume">再開</string>
+    <string name="action_stop">停止</string>
+</resources>

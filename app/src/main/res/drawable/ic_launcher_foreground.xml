@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- カメラ本体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,40 L84,40 A6,6 0 0 1 90,46 L90,74 A6,6 0 0 1 84,80 L24,80 A6,6 0 0 1 18,74 L18,46 A6,6 0 0 1 24,40 Z" />
+    <!-- ファインダーの出っ張り -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M44,30 L64,30 A3,3 0 0 1 67,33 L67,42 L41,42 L41,33 A3,3 0 0 1 44,30 Z" />
+    <!-- レンズの輪 -->
+    <path
+        android:fillColor="#1C1C1C"
+        android:pathData="M54,60 m-16,0 a16,16 0 1,0 32,0 a16,16 0 1,0 -32,0" />
+    <!-- 録画中を示す赤い丸（レンズ内） -->
+    <path
+        android:fillColor="#FF3B30"
+        android:pathData="M54,60 m-9,0 a9,9 0 1,0 18,0 a9,9 0 1,0 -18,0" />
+</vector>
